@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Wiring & Measurement Trainer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow-x: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useRef, useCallback, useEffect, useMemo } = React;
+
+const W = 1100, H = 740;
+const SNAP = 18;
+const MODES = ["OFF", "V DC", "mA DC", "Ω"];
+
+// ═══════════════════════════════════════════════════════
+// TERMINAL DEFINITIONS
+// ═══════════════════════════════════════════════════════
+const TERMS = {
+  // PSU outputs
+  psu_plus:      { x: 128, y: 168, label: "+24V", color: "#dc2626", group: "psu", row: "cab" },
+  psu_minus:     { x: 168, y: 168, label: "0V",   color: "#1e3a5f", group: "psu", row: "cab" },
+  // Terminal block - top row (positive bus)
+  tb_p1:         { x: 128, y: 228, label: "TB1+", color: "#dc2626", group: "tb", row: "cab" },
+  tb_p2:         { x: 158, y: 228, label: "TB2+", color: "#dc2626", group: "tb", row: "cab" },
+  tb_p3:         { x: 188, y: 228, label: "TB3+", color: "#dc2626", group: "tb", row: "cab" },
+  tb_p4:         { x: 218, y: 228, label: "TB4+", color: "#dc2626", group: "tb", row: "cab" },
+  // Terminal block - bottom row (negative bus)
+  tb_n1:         { x: 128, y: 260, label: "TB1−", color: "#1e3a5f", group: "tb", row: "cab" },
+  tb_n2:         { x: 158, y: 260, label: "TB2−", color: "#1e3a5f", group: "tb", row: "cab" },
+  tb_n3:         { x: 188, y: 260, label: "TB3−", color: "#1e3a5f", group: "tb", row: "cab" },
+  tb_n4:         { x: 218, y: 260, label: "TB4−", color: "#1e3a5f", group: "tb", row: "cab" },
+  // PLC power input
+  plc_pwr_plus:  { x: 310, y: 168, label: "PWR+", color: "#dc2626", group: "plc", row: "cab" },
+  plc_pwr_minus: { x: 340, y: 168, label: "PWR−", color: "#1e3a5f", group: "plc", row: "cab" },
+  // PLC analog input
+  plc_ai_plus:   { x: 385, y: 168, label: "AN IN+", color: "#b45309", group: "plc", row: "cab" },
+  plc_ai_minus:  { x: 415, y: 168, label: "AN IN−", color: "#1e40af", group: "plc", row: "cab" },
+  // PLC network port
+  plc_data:      { x: 460, y: 110, label: "NET",  color: "#059669", group: "plc", row: "cab" },
+  // HMI
+  hmi_pwr_plus:  { x: 100, y: 370, label: "+24V", color: "#dc2626", group: "hmi", row: "hmi" },
+  hmi_pwr_minus: { x: 140, y: 370, label: "0V",   color: "#1e3a5f", group: "hmi", row: "hmi" },
+  hmi_data:      { x: 290, y: 370, label: "NET",  color: "#059669", group: "hmi", row: "hmi" },
+  // Transmitter
+  xmtr_plus:     { x: 638, y: 395, label: "+",    color: "#dc2626", group: "xmtr", row: "field" },
+  xmtr_minus:    { x: 666, y: 395, label: "−",    color: "#1e40af", group: "xmtr", row: "field" },
+};
+
+// Valid connection pairs
+const VALID_PAIRS = [
+  // PSU to terminal block
+  ["psu_plus", "tb_p1"], ["psu_minus", "tb_n1"],
+  // TB to PLC power
+  ["tb_p2", "plc_pwr_plus"], ["tb_n2", "plc_pwr_minus"],
+  // TB to HMI power
+  ["tb_p3", "hmi_pwr_plus"], ["tb_n3", "hmi_pwr_minus"],
+  // PLC network to HMI
+  ["plc_data", "hmi_data"],
+  // 4-20mA loop: TB+ → xmtr+ → xmtr- → AI+ and AI- → TB-
+  ["tb_p4", "xmtr_plus"],
+  ["xmtr_minus", "plc_ai_plus"],
+  ["plc_ai_minus", "tb_n4"],
+];
+
+const STEPS = [
+  { text: "Connect PSU +24V to Terminal Block TB1+ to feed the power bus", from: "psu_plus", to: "tb_p1" },
+  { text: "Connect PSU 0V to Terminal Block TB1− to complete the power bus", from: "psu_minus", to: "tb_n1" },
+  { text: "Connect TB2+ to PLC PWR+ to power the controller", from: "tb_p2", to: "plc_pwr_plus" },
+  { text: "Connect TB2− to PLC PWR− to complete PLC power", from: "tb_n2", to: "plc_pwr_minus" },
+  { text: "Connect TB3+ to HMI +24V to power the display panel", from: "tb_p3", to: "hmi_pwr_plus" },
+  { text: "Connect TB3− to HMI 0V to complete HMI power", from: "tb_n3", to: "hmi_pwr_minus" },
+  { text: "Connect PLC NET to HMI NET with a network cable", from: "plc_data", to: "hmi_data" },
+  { text: "Connect TB4+ to Transmitter + to power the 4–20 mA loop", from: "tb_p4", to: "xmtr_plus" },
+  { text: "Connect Transmitter − to PLC AN IN+ (signal into Analog Input)", from: "xmtr_minus", to: "plc_ai_plus" },
+  { text: "Connect PLC AN IN− to TB4− to complete the current loop", from: "plc_ai_minus", to: "tb_n4" },
+  { text: "✅ All wired! Adjust tank level and verify readings. Use the multimeter to test the loop.", from: null, to: null },
+];
+
+function isValidPair(a, b) {
+  return VALID_PAIRS.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+}
+function hasWire(wires, a, b) {
+  return wires.some(w => (w.from === a && w.to === b) || (w.from === b && w.to === a));
+}
+function termConnected(wires, id) {
+  return wires.some(w => w.from === id || w.to === id);
+}
+function stepDone(wires, step) {
+  if (!step.from) return false;
+  return hasWire(wires, step.from, step.to);
+}
+
+function deriveState(wires) {
+  const psuToTBp = hasWire(wires, "psu_plus", "tb_p1");
+  const psuToTBn = hasWire(wires, "psu_minus", "tb_n1");
+  const tbPowered = psuToTBp && psuToTBn;
+  const plcPower = tbPowered && hasWire(wires, "tb_p2", "plc_pwr_plus") && hasWire(wires, "tb_n2", "plc_pwr_minus");
+  const hmiPower = tbPowered && hasWire(wires, "tb_p3", "hmi_pwr_plus") && hasWire(wires, "tb_n3", "hmi_pwr_minus");
+  const hmiComm = hmiPower && plcPower && hasWire(wires, "plc_data", "hmi_data");
+  const loopPwr = tbPowered && hasWire(wires, "tb_p4", "xmtr_plus");
+  const loopSig = hasWire(wires, "xmtr_minus", "plc_ai_plus");
+  const loopRet = hasWire(wires, "plc_ai_minus", "tb_n4");
+  const loopComplete = loopPwr && loopSig && loopRet;
+  const xmtrPowered = loopComplete;
+  const plcSignal = plcPower && loopComplete;
+  const hmiReading = hmiComm && plcSignal;
+  return { tbPowered, plcPower, hmiPower, hmiComm, loopComplete, xmtrPowered, plcSignal, hmiReading };
+}
+
+// ═══════════════════════════════════════════════════════
+// SMART WIRE ROUTING
+// ═══════════════════════════════════════════════════════
+function wireRoute(fromId, toId, wireIndex) {
+  const a = TERMS[fromId], b = TERMS[toId];
+  if (!a || !b) return "";
+  const offset = wireIndex * 4; // stagger parallel wires
+
+  // Direct vertical connections (PSU ↔ TB, same x roughly)
+  if (a.group === "psu" && b.group === "tb" || b.group === "psu" && a.group === "tb") {
+    const top = a.y < b.y ? a : b;
+    const bot = a.y < b.y ? b : a;
+    return `M${top.x} ${top.y} L${top.x} ${top.y + 10} L${bot.x} ${bot.y - 10} L${bot.x} ${bot.y}`;
+  }
+
+  // TB to PLC (same cabinet row, go down to channel then right then up)
+  if ((a.group === "tb" && b.group === "plc") || (a.group === "plc" && b.group === "tb")) {
+    const tb = a.group === "tb" ? a : b;
+    const plc = a.group === "plc" ? a : b;
+    const chanY = 290 + offset;
+    return `M${tb.x} ${tb.y} L${tb.x} ${chanY} L${plc.x} ${chanY} L${plc.x} ${plc.y}`;
+  }
+
+  // TB to HMI (go down from TB, route left/down to HMI)
+  if ((a.group === "tb" && b.group === "hmi") || (a.group === "hmi" && b.group === "tb")) {
+    const tb = a.group === "tb" ? a : b;
+    const hmi = a.group === "hmi" ? a : b;
+    const chanX = 60 + offset;
+    return `M${tb.x} ${tb.y} L${tb.x} ${tb.y + 20 + offset} L${chanX} ${tb.y + 20 + offset} L${chanX} ${hmi.y} L${hmi.x} ${hmi.y}`;
+  }
+
+  // PLC NET to HMI NET (data cable - route down left side)
+  if ((fromId === "plc_data" && toId === "hmi_data") || (fromId === "hmi_data" && toId === "plc_data")) {
+    return `M${a.x} ${a.y} L${a.x} ${a.y + 5} L${500} ${a.y + 5} L${500} ${325 + offset} L${b.x} ${325 + offset} L${b.x} ${b.y}`;
+  }
+
+  // TB to transmitter (field run - go right through conduit path)
+  if ((a.group === "tb" && b.group === "xmtr") || (a.group === "xmtr" && b.group === "tb")) {
+    const tb = a.group === "tb" ? a : b;
+    const xm = a.group === "xmtr" ? a : b;
+    const chanY = 310 + offset;
+    return `M${tb.x} ${tb.y} L${tb.x} ${chanY} L${xm.x} ${chanY} L${xm.x} ${xm.y}`;
+  }
+
+  // Transmitter to PLC AI (signal return - route through field then up)
+  if ((a.group === "xmtr" && b.group === "plc") || (a.group === "plc" && b.group === "xmtr")) {
+    const xm = a.group === "xmtr" ? a : b;
+    const plc = a.group === "plc" ? a : b;
+    const chanY = 340 + offset;
+    return `M${xm.x} ${xm.y} L${xm.x} ${chanY} L${plc.x} ${chanY} L${plc.x} ${plc.y}`;
+  }
+
+  // PLC AI- to TB (return within cabinet)
+  if ((a.group === "plc" && b.group === "tb") || (a.group === "tb" && b.group === "plc")) {
+    const plc = a.group === "plc" ? a : b;
+    const tb = a.group === "tb" ? a : b;
+    const chanY = 295 + offset;
+    return `M${plc.x} ${plc.y} L${plc.x} ${chanY} L${tb.x} ${chanY} L${tb.x} ${tb.y}`;
+  }
+
+  // Fallback: simple L-route
+  const midX = (a.x + b.x) / 2 + offset;
+  return `M${a.x} ${a.y} L${midX} ${a.y} L${midX} ${b.y} L${b.x} ${b.y}`;
+}
+
+function wireColor(from, to) {
+  if (from.includes("data") || to.includes("data")) return "#059669";
+  if (from.includes("xmtr") || to.includes("xmtr")) {
+    if (from.includes("plus") || to.includes("plus")) return "#b45309";
+    return "#1e40af";
+  }
+  if (from.includes("ai") || to.includes("ai")) return "#1e40af";
+  if (from.includes("plus") || to.includes("plus") || from.includes("_p") || to.includes("_p")) return "#dc2626";
+  return "#1e3a5f";
+}
+
+// ═══════════════════════════════════════════════════════
+// SVG COMPONENTS
+// ═══════════════════════════════════════════════════════
+
+function TerminalBlock({ tbPowered }) {
+  return (
+    <g>
+      <rect x="105" y="210" width="135" height="68" rx="4" fill="#444" stroke="#333" strokeWidth="1.5" />
+      <text x="172" y="206" textAnchor="middle" fontSize="8" fontWeight="700" fill="#78716c">TERMINAL BLOCK</text>
+      {/* DIN rail underneath */}
+      <rect x="108" y="275" width="129" height="4" rx="1" fill="#9ca3af" />
+      {/* Top row (positive) */}
+      {[0, 1, 2, 3].map(i => {
+        const cx = 128 + i * 30;
+        const hasPwr = tbPowered && i >= 0;
+        return (
+          <g key={`p${i}`}>
+            <rect x={cx - 12} y="215" width="24" height="20" rx="2" fill="#3b82f6" stroke="#2563eb" strokeWidth="0.8" />
+            <circle cx={cx} cy="225" r="5.5" fill="#d1d5db" stroke="#999" strokeWidth="0.8" />
+            <line x1={cx - 2.5} y1="222.5" x2={cx + 2.5} y2="227.5" stroke="#666" strokeWidth="0.8" />
+            <line x1={cx + 2.5} y1="222.5" x2={cx - 2.5} y2="227.5" stroke="#666" strokeWidth="0.8" />
+            {/* Power indicator LED */}
+            <circle cx={cx} cy="216" r="1.5" fill={tbPowered ? "#22c55e" : "#333"} />
+          </g>
+        );
+      })}
+      {/* Bottom row (negative) */}
+      {[0, 1, 2, 3].map(i => {
+        const cx = 128 + i * 30;
+        return (
+          <g key={`n${i}`}>
+            <rect x={cx - 12} y="247" width="24" height="20" rx="2" fill="#3b82f6" stroke="#2563eb" strokeWidth="0.8" />
+            <circle cx={cx} cy="257" r="5.5" fill="#d1d5db" stroke="#999" strokeWidth="0.8" />
+            <line x1={cx - 2.5} y1="254.5" x2={cx + 2.5} y2="259.5" stroke="#666" strokeWidth="0.8" />
+            <line x1={cx + 2.5} y1="254.5" x2={cx - 2.5} y2="259.5" stroke="#666" strokeWidth="0.8" />
+          </g>
+        );
+      })}
+      {/* Labels between rows */}
+      <text x="128" y="244" textAnchor="middle" fontSize="5" fill="#ccc">1</text>
+      <text x="158" y="244" textAnchor="middle" fontSize="5" fill="#ccc">2</text>
+      <text x="188" y="244" textAnchor="middle" fontSize="5" fill="#ccc">3</text>
+      <text x="218" y="244" textAnchor="middle" fontSize="5" fill="#ccc">4</text>
+    </g>
+  );
+}
+
+function Cabinet({ plcPower, plcSignal }) {
+  return (
+    <g>
+      <rect x="70" y="55" width="420" height="240" rx="6" fill="#e5e1d8" stroke="#a09882" strokeWidth="2" />
+      <text x="280" y="48" textAnchor="middle" fontSize="10" fontWeight="700" fill="#78716c" letterSpacing="0.1em">CONTROL CABINET</text>
+
+      {/* === PSU === */}
+      <rect x="90" y="70" width="100" height="104" rx="4" fill="#d1d5db" stroke="#9ca3af" strokeWidth="1.5" />
+      <rect x="98" y="78" width="84" height="36" rx="2" fill="#e5e7eb" stroke="#bbb" strokeWidth="0.8" />
+      <text x="140" y="95" textAnchor="middle" fontSize="12" fontWeight="800" fill="#1f2937">24V DC</text>
+      <text x="140" y="108" textAnchor="middle" fontSize="7" fill="#6b7280">POWER SUPPLY</text>
+      <circle cx="105" cy="125" r="3.5" fill="#22c55e" />
+      <text x="115" y="128" fontSize="6" fill="#6b7280">ON</text>
+      <text x="140" y="155" textAnchor="middle" fontSize="6" fill="#78716c">OUTPUT</text>
+
+      {/* === PLC === */}
+      <rect x="270" y="70" width="205" height="104" rx="4" fill="#1e293b" stroke="#475569" strokeWidth="1.5" />
+      <text x="372" y="66" textAnchor="middle" fontSize="9" fontWeight="600" fill="#78716c">PLC CONTROLLER</text>
+      {/* CPU */}
+      <rect x="278" y="78" width="40" height="86" rx="2" fill="#0f172a" stroke="#334155" strokeWidth="0.8" />
+      <rect x="282" y="84" width="32" height="9" rx="1" fill="#06b6d4" opacity={plcPower ? 0.8 : 0.12} />
+      <text x="298" y="108" textAnchor="middle" fontSize="6" fill="#94a3b8">CPU</text>
+      <circle cx="288" cy="118" r="2.5" fill={plcPower ? "#22c55e" : "#334155"} />
+      <text x="298" y="126" textAnchor="middle" fontSize="5" fill="#94a3b8">RUN</text>
+      {/* Analog Input module */}
+      <rect x="322" y="78" width="50" height="86" rx="2" fill="#0f172a" stroke="#334155" strokeWidth="0.8" />
+      <rect x="326" y="84" width="42" height="9" rx="1" fill="#06b6d4" opacity={plcPower ? 0.8 : 0.12} />
+      <text x="347" y="106" textAnchor="middle" fontSize="6" fill="#94a3b8">ANALOG</text>
+      <text x="347" y="114" textAnchor="middle" fontSize="6" fill="#94a3b8">INPUT</text>
+      <circle cx="332" cy="126" r="2.5" fill={plcSignal ? "#22c55e" : plcPower ? "#f59e0b" : "#334155"} />
+      <text x="347" y="134" textAnchor="middle" fontSize="5" fill="#94a3b8">CH 0</text>
+      <text x="347" y="155" textAnchor="middle" fontSize="5" fill="#64748b">4–20 mA</text>
+      {/* Empty slot */}
+      <rect x="376" y="78" width="35" height="86" rx="2" fill="#0f172a" stroke="#334155" strokeWidth="0.5" />
+      {/* Network port */}
+      <rect x="440" y="95" width="26" height="28" rx="3" fill="#374151" stroke="#4b5563" strokeWidth="1" />
+      <rect x="444" y="100" width="18" height="11" rx="1.5" fill="#0f172a" />
+      <circle cx="453" cy="117" r="2" fill={plcPower ? "#22c55e" : "#334155"} />
+
+      {/* === TERMINAL BLOCK (inside cabinet) === */}
+      <TerminalBlock tbPowered={false} />
+    </g>
+  );
+}
+
+function HMIPanel({ x, y, powered, hasComm, hasSignal, level, mA }) {
+  return (
+    <g>
+      <rect x={x} y={y} width="250" height="130" rx="6" fill="#6b7280" stroke="#4b5563" strokeWidth="2" />
+      <text x={x + 125} y={y + 16} textAnchor="middle" fontSize="9" fontWeight="700" fill="#d1d5db">HMI PANEL</text>
+      {/* Power LED */}
+      <circle cx={x + 225} cy={y + 15} r="4" fill={powered ? "#22c55e" : "#334155"} />
+      {/* Screen */}
+      <rect x={x + 10} y={y + 24} width="185" height="85" rx="3"
+        fill={powered ? "#0f172a" : "#1a1a1a"} stroke="#334155" strokeWidth="1" />
+      {powered ? (
+        hasComm && hasSignal ? (
+          <>
+            <text x={x + 102} y={y + 42} textAnchor="middle" fontSize="9" fill="#94a3b8">TANK LEVEL</text>
+            <rect x={x + 20} y={y + 50} width="16" height="48" rx="2" fill="#1e293b" stroke="#334155" strokeWidth="0.5" />
+            <rect x={x + 22} y={y + 52 + 44 * (1 - level / 100)} width="12" height={Math.max(1, 44 * (level / 100))}
+              fill={level > 80 ? "#ef4444" : level > 60 ? "#f59e0b" : "#22c55e"} rx="1" />
+            <text x={x + 110} y={y + 68} textAnchor="middle" fontSize="20" fontWeight="800" fill="#22d3ee"
+              fontFamily="'Courier New', monospace">{level.toFixed(1)}%</text>
+            <text x={x + 110} y={y + 86} textAnchor="middle" fontSize="11" fill="#94a3b8">{mA.toFixed(2)} mA</text>
+            <text x={x + 110} y={y + 102} textAnchor="middle" fontSize="8"
+              fill={level > 80 ? "#ef4444" : "#22c55e"}>{level > 80 ? "⚠ HIGH LEVEL" : "● NORMAL"}</text>
+          </>
+        ) : hasComm ? (
+          <>
+            <text x={x + 102} y={y + 60} textAnchor="middle" fontSize="11" fill="#f59e0b">COMM OK</text>
+            <text x={x + 102} y={y + 78} textAnchor="middle" fontSize="10" fill="#f59e0b">NO INPUT SIGNAL</text>
+          </>
+        ) : (
+          <>
+            <text x={x + 102} y={y + 60} textAnchor="middle" fontSize="11" fill="#ef4444">NO NETWORK</text>
+            <text x={x + 102} y={y + 78} textAnchor="middle" fontSize="9" fill="#ef4444">Connect PLC ↔ HMI</text>
+          </>
+        )
+      ) : (
+        <text x={x + 102} y={y + 72} textAnchor="middle" fontSize="11" fill="#333">OFFLINE</text>
+      )}
+    </g>
+  );
+}
+
+function TankAndXmtr({ x, y, level, mA, xmtrPowered }) {
+  const tankH = 280, tankW = 140, wallR = 24;
+  const liquidH = (level / 100) * (tankH - 14);
+  const liquidY = y + tankH - liquidH - 7;
+  return (
+    <g>
+      <rect x={x} y={y + wallR} width={tankW} height={tankH - wallR * 2} fill="#8a8a8a" stroke="#666" strokeWidth="2" />
+      <ellipse cx={x + tankW / 2} cy={y + wallR} rx={tankW / 2} ry={wallR} fill="#999" stroke="#666" strokeWidth="2" />
+      <ellipse cx={x + tankW / 2} cy={y + tankH - wallR} rx={tankW / 2} ry={wallR} fill="#7a7a7a" stroke="#666" strokeWidth="2" />
+      <clipPath id="tC"><rect x={x + 2} y={y + wallR} width={tankW - 4} height={tankH - wallR * 2} />
+        <ellipse cx={x + tankW / 2} cy={y + tankH - wallR} rx={tankW / 2 - 2} ry={wallR - 2} /></clipPath>
+      <rect x={x + 2} y={liquidY} width={tankW - 4} height={y + tankH - liquidY} fill="#d97706" opacity="0.7" clipPath="url(#tC)" />
+      <line x1={x + 8} y1={liquidY} x2={x + tankW - 8} y2={liquidY} stroke="#fbbf24" strokeWidth="1.5" opacity="0.4" />
+      <text x={x + tankW / 2} y={y + 46} textAnchor="middle" fontSize="11" fontWeight="700" fill="#fff" opacity="0.6">Gas</text>
+      <text x={x + tankW / 2} y={y + tankH - 50} textAnchor="middle" fontSize="11" fontWeight="700" fill="#fff" opacity="0.7">Liquid</text>
+      <text x={x + tankW / 2} y={y - 6} textAnchor="middle" fontSize="9" fontWeight="700" fill="#78716c">PROCESS VESSEL</text>
+      {[0, 25, 50, 75, 100].map(p => {
+        const my = y + tankH - 7 - (p / 100) * (tankH - 14);
+        return <g key={p}><line x1={x + tankW + 3} y1={my} x2={x + tankW + 9} y2={my} stroke="#999" strokeWidth="0.8" />
+          <text x={x + tankW + 13} y={my + 3} fontSize="6" fill="#78716c">{p}%</text></g>;
+      })}
+      {/* Bottom nozzle */}
+      <rect x={x + 25} y={y + tankH - wallR + 6} width="14" height="22" fill="#777" stroke="#555" strokeWidth="1" rx="2" />
+      <rect x={x + 20} y={y + tankH - wallR + 26} width="24" height="5" fill="#888" stroke="#666" strokeWidth="0.6" rx="1" />
+      {/* Impulse tubing */}
+      <path d={`M ${x + 32} ${y + tankH - wallR + 31} L ${x + 32} ${y + tankH + 28} L ${x - 75} ${y + tankH + 28} L ${x - 75} ${y + tankH - 40}`}
+        fill="none" stroke="#999" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d={`M ${x + 32} ${y + tankH - wallR + 31} L ${x + 32} ${y + tankH + 28} L ${x - 75} ${y + tankH + 28} L ${x - 75} ${y + tankH - 40}`}
+        fill="none" stroke="#bbb" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Transmitter */}
+      <g>
+        <rect x={x - 83} y={y + tankH - 45} width="14" height="12" rx="1.5" fill="#9aa3ab" stroke="#5a5f66" strokeWidth="0.8" />
+        <rect x={x - 103} y={y + tankH - 94} width="54" height="44" rx="4" fill="#3e89c8" stroke="#1f537e" strokeWidth="1.5" />
+        <rect x={x - 97} y={y + tankH - 88} width="42" height="16" rx="2" fill="#0f1820" stroke="#334756" strokeWidth="0.5" />
+        <text x={x - 76} y={y + tankH - 76} textAnchor="middle" fontSize="9" fontWeight="700"
+          fill={xmtrPowered ? "#5df58b" : "#1a2e1a"} fontFamily="'Courier New', monospace">
+          {xmtrPowered ? mA.toFixed(2) : "----"}
+        </text>
+        <text x={x - 76} y={y + tankH - 68} textAnchor="middle" fontSize="4.5" fill="#b8d8ef">ROSEMOUNT 3051</text>
+        <rect x={x - 50} y={y + tankH - 84} width="3.5" height="12" rx="1.5" fill="#f26b1d" />
+        {/* Terminal head */}
+        <circle cx={x - 118} cy={y + tankH - 72} r="22" fill="#3e89c8" stroke="#1f537e" strokeWidth="1.5" />
+        <circle cx={x - 118} cy={y + tankH - 72} r="17" fill="#d8e0e7" stroke="#8f9aa5" strokeWidth="0.8" />
+        <rect x={x - 134} y={y + tankH - 83} width="32" height="22" rx="2.5" fill="#30353a" stroke="#171a1d" strokeWidth="0.7" />
+        {[{ cx: x - 126, l: "+" }, { cx: x - 114, l: "−" }].map((t, i) => (
+          <g key={i}>
+            <circle cx={t.cx} cy={y + tankH - 72} r="3.5" fill="#d9dde1" stroke="#8a8f94" strokeWidth="0.7" />
+            <text x={t.cx} y={y + tankH - 69.5} textAnchor="middle" fontSize="5" fontWeight="800" fill="#333">{t.l}</text>
+          </g>
+        ))}
+        <text x={x - 120} y={y + tankH - 59} textAnchor="middle" fontSize="4" fill="#dfe6eb">PWR/COMM</text>
+        <text x={x - 76} y={y + tankH - 40} textAnchor="middle" fontSize="8" fontWeight="700" fill="#1f2937">PT-101</text>
+      </g>
+    </g>
+  );
+}
+
+function Meter({ x, y, text, unit, modeIdx, onModeClick, ok, blown }) {
+  return (
+    <g>
+      <rect x={x} y={y} width="90" height="145" rx="8" fill="#ca8a04" stroke="#92400e" strokeWidth="1.5" />
+      <rect x={x - 2} y={y + 3} width="5" height="139" rx="2" fill="#374151" />
+      <rect x={x + 87} y={y + 3} width="5" height="139" rx="2" fill="#374151" />
+      <rect x={x + 10} y={y + 9} width="70" height="35" rx="2.5" fill="#1a2e1a" stroke="#374151" strokeWidth="0.7" />
+      <text x={x + 74} y={y + 32} textAnchor="end" fontSize="18" fontWeight="700" fontFamily="'Courier New', monospace"
+        fill={ok ? "#4ade80" : blown ? "#ef4444" : "#22c55e"}>{text || "----"}</text>
+      <text x={x + 76} y={y + 40} textAnchor="end" fontSize="8" fill="#4ade80" opacity="0.7">{unit}</text>
+      <circle cx={x + 45} cy={y + 68} r="16" fill="#374151" stroke="#4b5563" strokeWidth="1" style={{ cursor: "pointer" }} onClick={onModeClick} />
+      {MODES.map((m, i) => {
+        const a2 = -90 + (i / (MODES.length - 1)) * 180, r = (a2 * Math.PI) / 180;
+        return <text key={m} x={x + 45 + Math.cos(r) * 23} y={y + 68 + Math.sin(r) * 23 + 3} textAnchor="middle" fontSize="5.5"
+          fontWeight={i === modeIdx ? "800" : "400"} fill={i === modeIdx ? "#fbbf24" : "#9ca3af"} style={{ cursor: "pointer" }} onClick={onModeClick}>{m}</text>;
+      })}
+      {(() => { const a2 = -90 + (modeIdx / (MODES.length - 1)) * 180, r = (a2 * Math.PI) / 180;
+        return <line x1={x + 45} y1={y + 68} x2={x + 45 + Math.cos(r) * 12} y2={y + 68 + Math.sin(r) * 12} stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" />; })()}
+      <circle cx={x + 45} cy={y + 68} r="3" fill="#fbbf24" />
+      <text x={x + 45} y={y + 92} textAnchor="middle" fontSize="5.5" fill="#1f2937" fontWeight="600">▲ CLICK DIAL</text>
+      <text x={x + 28} y={y + 104} textAnchor="middle" fontSize="5.5" fill="#1f2937" fontWeight="700">COM</text>
+      <circle cx={x + 28} cy={y + 112} r="4.5" fill="#1f2937" stroke="#374151" strokeWidth="1" />
+      <text x={x + 62} y={y + 104} textAnchor="middle" fontSize="5.5" fill="#1f2937" fontWeight="700">mA</text>
+      <circle cx={x + 62} cy={y + 112} r="4.5" fill="#8b0000" stroke="#374151" strokeWidth="1" />
+      <text x={x + 45} y={y - 5} textAnchor="middle" fontSize="7" fontWeight="600" fill="#78716c">MULTIMETER</text>
+    </g>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════
+function WiringTrainer() {
+  const [tankLevel, setTankLevel] = useState(50);
+  const [wires, setWires] = useState([]);
+  const [selTerm, setSelTerm] = useState(null);
+  const [modeIdx, setModeIdx] = useState(0);
+  const [probes, setProbes] = useState({ red: { x: 560, y: 590, term: null }, black: { x: 530, y: 590, term: null } });
+  const [dragProbe, setDragProbe] = useState(null);
+  const [blownFuse, setBlownFuse] = useState(false);
+  const svgRef = useRef(null);
+
+  const mA = 4 + (tankLevel / 100) * 16;
+  const mode = MODES[modeIdx];
+  const state = useMemo(() => deriveState(wires), [wires]);
+
+  const currentStep = useMemo(() => {
+    for (let i = 0; i < STEPS.length; i++) {
+      if (!STEPS[i].from || !stepDone(wires, STEPS[i])) return i;
+    }
+    return STEPS.length - 1;
+  }, [wires]);
+
+  const meterReading = useMemo(() => {
+    if (mode === "OFF") return { text: "", unit: "" };
+    if (blownFuse) return { text: "FUSE", unit: "" };
+    const rT = probes.red.term, bT = probes.black.term;
+    if (!rT || !bT) return { text: "OL", unit: mode === "mA DC" ? "mA" : "V" };
+    if (mode === "mA DC" && state.loopComplete) {
+      const sigPairs = [["xmtr_minus", "plc_ai_plus"], ["tb_p4", "xmtr_plus"], ["plc_ai_minus", "tb_n4"]];
+      for (const [a, b] of sigPairs) {
+        if ((rT === a && bT === b) || (rT === b && bT === a)) return { text: mA.toFixed(2), unit: "mA" };
+      }
+    }
+    if (mode === "V DC") {
+      if ((rT === "psu_plus" && bT === "psu_minus") || (rT === "psu_minus" && bT === "psu_plus")) return { text: "24.0", unit: "V" };
+      if (state.tbPowered) {
+        const anyP = rT?.includes("tb_p") || bT?.includes("tb_p");
+        const anyN = rT?.includes("tb_n") || bT?.includes("tb_n");
+        if (anyP && anyN) return { text: "24.0", unit: "V" };
+      }
+    }
+    return { text: "0.00", unit: mode === "mA DC" ? "mA" : mode === "Ω" ? "Ω" : "V" };
+  }, [probes, mode, state, mA, blownFuse]);
+
+  const getSVGPt = useCallback((e) => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const r = svg.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (cx - r.left) * (W / r.width), y: (cy - r.top) * (H / r.height) };
+  }, []);
+
+  const findTerm = useCallback((px, py) => {
+    for (const [id, t] of Object.entries(TERMS)) if (Math.hypot(px - t.x, py - t.y) < SNAP) return id;
+    return null;
+  }, []);
+
+  const handleTermClick = useCallback((termId) => {
+    if (dragProbe) return;
+    if (!selTerm) { setSelTerm(termId); return; }
+    if (selTerm === termId) { setSelTerm(null); return; }
+    if (!hasWire(wires, selTerm, termId)) {
+      setWires(prev => [...prev, { from: selTerm, to: termId, valid: isValidPair(selTerm, termId) }]);
+    }
+    setSelTerm(null);
+  }, [selTerm, wires, dragProbe]);
+
+  const handleSVGClick = useCallback((e) => {
+    if (dragProbe) return;
+    const pt = getSVGPt(e);
+    const term = findTerm(pt.x, pt.y);
+    if (term) handleTermClick(term);
+    else setSelTerm(null);
+  }, [getSVGPt, findTerm, handleTermClick, dragProbe]);
+
+  const handleProbeDown = useCallback((color) => (e) => {
+    e.preventDefault(); e.stopPropagation();
+    setDragProbe(color); setSelTerm(null);
+  }, []);
+
+  const handlePtrMove = useCallback((e) => {
+    if (!dragProbe) return; e.preventDefault();
+    const pt = getSVGPt(e);
+    setProbes(prev => ({ ...prev, [dragProbe]: { x: pt.x, y: pt.y, term: null } }));
+  }, [dragProbe, getSVGPt]);
+
+  const handlePtrUp = useCallback((e) => {
+    if (!dragProbe) return; e.preventDefault();
+    const pt = getSVGPt(e);
+    const term = findTerm(pt.x, pt.y);
+    const other = probes[dragProbe === "red" ? "black" : "red"].term;
+    if (term && term !== other) {
+      setProbes(prev => ({ ...prev, [dragProbe]: { x: TERMS[term].x, y: TERMS[term].y + 14, term } }));
+    } else {
+      const home = dragProbe === "red" ? { x: 560, y: 590 } : { x: 530, y: 590 };
+      setProbes(prev => ({ ...prev, [dragProbe]: { ...home, term: null } }));
+    }
+    setDragProbe(null);
+  }, [dragProbe, probes, getSVGPt, findTerm]);
+
+  useEffect(() => {
+    if (!dragProbe) return;
+    const m = (e) => handlePtrMove(e), u = (e) => handlePtrUp(e);
+    window.addEventListener("pointermove", m); window.addEventListener("pointerup", u);
+    window.addEventListener("touchmove", m, { passive: false }); window.addEventListener("touchend", u);
+    return () => { window.removeEventListener("pointermove", m); window.removeEventListener("pointerup", u);
+      window.removeEventListener("touchmove", m); window.removeEventListener("touchend", u); };
+  }, [dragProbe, handlePtrMove, handlePtrUp]);
+
+  const removeWire = (i) => setWires(prev => prev.filter((_, j) => j !== i));
+  const clearAll = () => { setWires([]); setSelTerm(null); setBlownFuse(false); };
+
+  const step = STEPS[currentStep];
+  const fbC = currentStep >= STEPS.length - 1 ? "#22c55e" : "#60a5fa";
+  const fb = currentStep >= STEPS.length - 1 ? step.text : `Step ${currentStep + 1}/${STEPS.length - 1}: ${step.text}`;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(180deg, #0c1220 0%, #162032 100%)",
+      fontFamily: "'JetBrains Mono', 'SF Mono', monospace", color: "#e2e8f0",
+      display: "flex", flexDirection: "column", alignItems: "center", padding: "8px",
+      userSelect: "none", touchAction: "none" }}>
+      <h1 style={{ fontSize: "clamp(13px, 2.3vw, 18px)", fontWeight: 800, margin: "0 0 4px", letterSpacing: "0.06em", textTransform: "uppercase",
+        background: "linear-gradient(90deg, #f59e0b, #f97316)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+        Wiring &amp; Measurement Trainer v2
+      </h1>
+
+      <div style={{ width: "100%", maxWidth: W, padding: "5px 12px", borderRadius: 8, marginBottom: 4,
+        background: "#1e293b", border: `1px solid ${fbC}40`, fontSize: "clamp(10px, 1.5vw, 12px)", color: fbC, fontWeight: 600 }}>
+        {fb}
+      </div>
+
+      <div style={{ width: "100%", maxWidth: W }}>
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} onClick={handleSVGClick}
+          style={{ width: "100%", height: "auto", borderRadius: 10, cursor: dragProbe ? "grabbing" : "default",
+            background: "linear-gradient(180deg, #f5f0e8 0%, #e8e0d4 100%)", border: "1px solid #c4b5a0" }}>
+          <defs><filter id="sh"><feDropShadow dx="1" dy="2" stdDeviation="3" floodOpacity="0.18" /></filter></defs>
+
+          <rect x={560} y={0} width={W - 560} height={H} fill="#e8dfd0" opacity="0.4" />
+          <text x={820} y={H - 5} textAnchor="middle" fontSize="8" fill="#a0937f" fontWeight="600" letterSpacing="0.1em">FIELD</text>
+          <text x={280} y={H - 5} textAnchor="middle" fontSize="8" fill="#a0937f" fontWeight="600" letterSpacing="0.1em">CONTROL ROOM</text>
+          <line x1="560" y1="0" x2="560" y2={H} stroke="#c4b5a0" strokeWidth="1.5" strokeDasharray="6 4" />
+
+          <g filter="url(#sh)"><Cabinet plcPower={state.plcPower} plcSignal={state.plcSignal} /></g>
+          <g filter="url(#sh)"><HMIPanel x={70} y={340} powered={state.hmiPower} hasComm={state.hmiComm} hasSignal={state.plcSignal} level={tankLevel} mA={mA} /></g>
+          <g filter="url(#sh)"><TankAndXmtr x={770} y={50} level={tankLevel} mA={mA} xmtrPowered={state.xmtrPowered} /></g>
+
+          {/* Wires */}
+          {wires.map((w, i) => (
+            <g key={i} onClick={(e) => { e.stopPropagation(); removeWire(i); }} style={{ cursor: "pointer" }}>
+              <path d={wireRoute(w.from, w.to, i)} fill="none"
+                stroke={w.valid ? wireColor(w.from, w.to) : "#ef4444"}
+                strokeWidth={w.valid ? 2.5 : 2} strokeLinecap="round" strokeLinejoin="round"
+                strokeDasharray={w.valid ? "none" : "5 3"} opacity="0.85" />
+              {/* Invisible thicker hit area */}
+              <path d={wireRoute(w.from, w.to, i)} fill="none" stroke="transparent" strokeWidth="12" />
+              {!w.valid && <text x={(TERMS[w.from].x + TERMS[w.to].x) / 2}
+                y={Math.max(TERMS[w.from].y, TERMS[w.to].y) + 45}
+                textAnchor="middle" fontSize="7" fill="#ef4444" fontWeight="700">✕ WRONG</text>}
+            </g>
+          ))}
+
+          {/* Selection highlight */}
+          {selTerm && <circle cx={TERMS[selTerm].x} cy={TERMS[selTerm].y} r={SNAP + 2} fill="#f59e0b" opacity="0.12">
+            <animate attributeName="r" values={`${SNAP};${SNAP + 6};${SNAP}`} dur="1s" repeatCount="indefinite" />
+          </circle>}
+
+          {/* Terminals */}
+          {Object.entries(TERMS).map(([id, t]) => {
+            const isSel = selTerm === id;
+            const isTarget = (step.from === id || step.to === id) && currentStep < STEPS.length - 1;
+            const isConn = termConnected(wires, id);
+            return (
+              <g key={id} onClick={(e) => { e.stopPropagation(); handleTermClick(id); }} style={{ cursor: "pointer" }}>
+                {isTarget && !isConn && <circle cx={t.x} cy={t.y} r="13" fill="none" stroke="#f59e0b" strokeWidth="1.8" opacity="0.5">
+                  <animate attributeName="r" values="11;15;11" dur="1.1s" repeatCount="indefinite" />
+                  <animate attributeName="opacity" values="0.5;0.15;0.5" dur="1.1s" repeatCount="indefinite" />
+                </circle>}
+                <circle cx={t.x} cy={t.y} r="7" fill={isSel ? "#f59e0b" : isConn ? "#475569" : t.color}
+                  stroke={isSel ? "#f59e0b" : "#fff"} strokeWidth={isSel ? 2 : 1.2} />
+                <text x={t.x} y={t.y + 18} textAnchor="middle" fontSize="6" fontWeight="600"
+                  fill={isTarget && !isConn ? "#92400e" : "#78716c"}>{t.label}</text>
+              </g>
+            );
+          })}
+
+          {/* Meter */}
+          <g filter="url(#sh)">
+            <Meter x={490} y={490} text={meterReading.text} unit={meterReading.unit}
+              modeIdx={modeIdx} onModeClick={(e) => { e.stopPropagation(); setModeIdx(i => (i + 1) % MODES.length); }}
+              ok={meterReading.text === mA.toFixed(2)} blown={blownFuse} />
+          </g>
+
+          {/* Probe wires */}
+          <path d={`M ${518} ${602} Q ${518} ${(602 + probes.black.y) / 2 + 15} ${probes.black.x} ${probes.black.y}`}
+            fill="none" stroke="#1f2937" strokeWidth="2.5" strokeLinecap="round" />
+          <path d={`M ${552} ${602} Q ${552} ${(602 + probes.red.y) / 2 + 15} ${probes.red.x} ${probes.red.y}`}
+            fill="none" stroke="#dc2626" strokeWidth="2.5" strokeLinecap="round" />
+          {[["black", "#1f2937", "#4b5563"], ["red", "#dc2626", "#991b1b"]].map(([c, fill, str]) => (
+            <g key={c} style={{ cursor: dragProbe === c ? "grabbing" : "grab" }}
+              onPointerDown={handleProbeDown(c)} onTouchStart={handleProbeDown(c)} onClick={(e) => e.stopPropagation()}>
+              <rect x={probes[c].x - 3.5} y={probes[c].y - 11} width="7" height="16" rx="2" fill={fill} stroke={str} strokeWidth="1" />
+              <line x1={probes[c].x} y1={probes[c].y + 5} x2={probes[c].x} y2={probes[c].y + 11} stroke="#d1d5db" strokeWidth="2" strokeLinecap="round" />
+              <circle cx={probes[c].x} cy={probes[c].y} r="13" fill="transparent" />
+            </g>
+          ))}
+
+          {/* Progress dots */}
+          {STEPS.slice(0, -1).map((s, i) => (
+            <circle key={i} cx={490 + i * 12} cy={480} r="3.5"
+              fill={stepDone(wires, s) ? "#22c55e" : i === currentStep ? "#f59e0b" : "#475569"} stroke="#fff" strokeWidth="0.4" />
+          ))}
+        </svg>
+      </div>
+
+      <div style={{ width: "100%", maxWidth: W, marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+          padding: "5px 10px", borderRadius: 8, background: "#1e293b", border: "1px solid #334155" }}>
+          <label style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8" }}>TANK LEVEL:</label>
+          <input type="range" min="0" max="100" value={tankLevel} onChange={(e) => setTankLevel(Number(e.target.value))}
+            style={{ flex: 1, minWidth: 80, accentColor: "#3b82f6" }} />
+          <span style={{ fontSize: 12, fontWeight: 800, color: "#3b82f6", minWidth: 32 }}>{tankLevel}%</span>
+          <button onClick={clearAll} style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid #475569",
+            background: "#334155", color: "#e2e8f0", fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", marginLeft: "auto" }}>
+            ↺ CLEAR ALL
+          </button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 4 }}>
+          <div style={{ padding: "4px 8px", borderRadius: 6, background: "#1e293b", border: "1px solid #334155", fontSize: 9, color: "#94a3b8" }}>
+            <strong style={{ color: "#f59e0b" }}>WIRING:</strong> Click a terminal → click another to connect. Click a wire to remove it. Wrong wires shown dashed red.
+          </div>
+          <div style={{ padding: "4px 8px", borderRadius: 6, background: "#1e293b", border: "1px solid #334155", fontSize: 9, color: "#94a3b8" }}>
+            <strong style={{ color: "#22d3ee" }}>METER:</strong> Drag probes to terminals. Set dial to mA DC. Read loop current on the signal path.
+          </div>
+          <div style={{ padding: "4px 8px", borderRadius: 6, background: "#1e293b", border: "1px solid #334155", fontSize: 9, color: "#94a3b8" }}>
+            <strong style={{ color: "#22c55e" }}>REACTIVE:</strong> Components power on/off in real-time as you wire. PLC LEDs, HMI screen, and transmitter all respond.
+          </div>
+        </div>
+        {wires.length > 0 && (
+          <div style={{ padding: "4px 8px", borderRadius: 6, background: "#1e293b", border: "1px solid #334155", fontSize: 8, color: "#94a3b8" }}>
+            <strong>Connections ({wires.length}):</strong>{" "}
+            {wires.map((w, i) => (
+              <span key={i} style={{ color: w.valid ? "#22c55e" : "#ef4444", cursor: "pointer" }} onClick={() => removeWire(i)}>
+                {TERMS[w.from]?.label}→{TERMS[w.to]?.label}{w.valid ? "✓" : "✕"}{i < wires.length - 1 ? " · " : ""}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<WiringTrainer />);
+  </script>
+</body>
+</html>
